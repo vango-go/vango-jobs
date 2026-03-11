@@ -14,6 +14,8 @@ import (
 	jobs "github.com/vango-go/vango-jobs"
 )
 
+var writeStatusTextFn = writeStatusText
+
 // Config configures the scaffold-friendly worker/admin command surface.
 type Config struct {
 	Runtime   *jobs.Runtime
@@ -116,7 +118,9 @@ func runWorkerProcess(ctx context.Context, cfg Config, args []string) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errCh <- runStatusLoop(ctx, cfg, statusInterval, statusFailures)
+			if err := runWorkerStatusLoop(ctx, cfg, statusInterval, statusFailures); err != nil && ctx.Err() == nil {
+				_, _ = fmt.Fprintf(statusErrorWriter(cfg), "jobs status reporter stopped: %v\n", err)
+			}
 		}()
 	}
 
@@ -340,9 +344,23 @@ func runPrune(ctx context.Context, cfg Config, args []string) error {
 }
 
 type statusSnapshot struct {
-	Queues         []jobs.QueueSnapshot `json:"queues"`
-	RecentFailures []*jobs.RawSnapshot  `json:"recent_failures"`
-	GeneratedAt    time.Time            `json:"generated_at"`
+	Queues         []jobs.QueueSnapshot   `json:"queues"`
+	RecentFailures []statusFailureSummary `json:"recent_failures"`
+	GeneratedAt    time.Time              `json:"generated_at"`
+}
+
+// statusFailureSummary is the safe, summary-oriented status view for failed jobs.
+// Deep payload/output/metadata inspection belongs to the explicit inspect command.
+type statusFailureSummary struct {
+	Ref         jobs.Ref    `json:"ref"`
+	Queue       string      `json:"queue"`
+	Status      jobs.Status `json:"status"`
+	Attempts    int         `json:"attempts"`
+	MaxAttempts int         `json:"max_attempts"`
+	CreatedAt   time.Time   `json:"created_at"`
+	FinishedAt  *time.Time  `json:"finished_at,omitempty"`
+	SafeError   string      `json:"safe_error,omitempty"`
+	ErrorCode   string      `json:"error_code,omitempty"`
 }
 
 func readStatusSnapshot(ctx context.Context, cfg Config, failures int) (*statusSnapshot, error) {
@@ -353,15 +371,17 @@ func readStatusSnapshot(ctx context.Context, cfg Config, failures int) (*statusS
 	if failures < 0 {
 		failures = 0
 	}
-	recentFailures := make([]*jobs.RawSnapshot, 0)
+	recentFailures := make([]statusFailureSummary, 0)
 	if failures > 0 {
-		recentFailures, err = cfg.Runtime.List(ctx, jobs.ListFilter{
+		rows, err := cfg.Runtime.List(ctx, jobs.ListFilter{
 			Statuses: []jobs.Status{jobs.StatusFailed},
 			Limit:    failures,
+			Order:    jobs.ListOrderTerminalTimeDesc,
 		}, jobs.InspectAdmin())
 		if err != nil {
 			return nil, err
 		}
+		recentFailures = summarizeStatusFailures(rows)
 	}
 	return &statusSnapshot{
 		Queues:         queues,
@@ -374,7 +394,7 @@ func runStatusLoop(ctx context.Context, cfg Config, interval time.Duration, fail
 	if interval <= 0 {
 		return usageError("status interval must be greater than zero")
 	}
-	if err := writeStatusText(ctx, cfg, failures); err != nil {
+	if err := runStatusTick(ctx, cfg, failures, false); err != nil {
 		return err
 	}
 	ticker := time.NewTicker(interval)
@@ -384,11 +404,52 @@ func runStatusLoop(ctx context.Context, cfg Config, interval time.Duration, fail
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := writeStatusText(ctx, cfg, failures); err != nil {
+			if err := runStatusTick(ctx, cfg, failures, false); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+func runWorkerStatusLoop(ctx context.Context, cfg Config, interval time.Duration, failures int) error {
+	if interval <= 0 {
+		return usageError("status interval must be greater than zero")
+	}
+	if err := runStatusTick(ctx, cfg, failures, true); err != nil {
+		return err
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := runStatusTick(ctx, cfg, failures, true); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func runStatusTick(ctx context.Context, cfg Config, failures int, bestEffort bool) error {
+	if err := writeStatusTextFn(ctx, cfg, failures); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if !bestEffort {
+			return err
+		}
+		_, _ = fmt.Fprintf(statusErrorWriter(cfg), "jobs status snapshot failed; continuing: %v\n", err)
+	}
+	return nil
+}
+
+func statusErrorWriter(cfg Config) io.Writer {
+	if cfg.Stderr != nil {
+		return cfg.Stderr
+	}
+	return os.Stderr
 }
 
 func writeStatusText(ctx context.Context, cfg Config, failures int) error {
@@ -425,6 +486,27 @@ func writeStatusText(ctx context.Context, cfg Config, failures int) error {
 	}
 	_, _ = fmt.Fprintln(cfg.Stdout)
 	return nil
+}
+
+func summarizeStatusFailures(rows []*jobs.RawSnapshot) []statusFailureSummary {
+	out := make([]statusFailureSummary, 0, len(rows))
+	for _, row := range rows {
+		if row == nil {
+			continue
+		}
+		out = append(out, statusFailureSummary{
+			Ref:         row.Ref,
+			Queue:       row.Queue,
+			Status:      row.Status,
+			Attempts:    row.Attempts,
+			MaxAttempts: row.MaxAttempts,
+			CreatedAt:   row.CreatedAt,
+			FinishedAt:  row.FinishedAt,
+			SafeError:   row.SafeError,
+			ErrorCode:   row.ErrorCode,
+		})
+	}
+	return out
 }
 
 func parseStatuses(raw string) []jobs.Status {

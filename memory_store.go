@@ -196,15 +196,42 @@ func (s *memoryStore) list(ctx context.Context, filter ListFilter, scope authSco
 		out = append(out, job.snapshot.Clone())
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].Ref.ID > out[j].Ref.ID
+		order := normalizeListOrder(filter.Order)
+		left := snapshotListTime(out[i], order)
+		right := snapshotListTime(out[j], order)
+		if left.Equal(right) {
+			if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+				if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+					return out[i].Ref.ID > out[j].Ref.ID
+				}
+				return out[i].CreatedAt.After(out[j].CreatedAt)
+			}
+			return out[i].UpdatedAt.After(out[j].UpdatedAt)
 		}
-		return out[i].CreatedAt.After(out[j].CreatedAt)
+		return left.After(right)
 	})
 	if len(out) > limit {
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+func snapshotListTime(snap *RawSnapshot, order ListOrder) time.Time {
+	if snap == nil {
+		return time.Time{}
+	}
+	switch normalizeListOrder(order) {
+	case ListOrderTerminalTimeDesc:
+		if snap.FinishedAt != nil {
+			return snap.FinishedAt.UTC()
+		}
+		if !snap.UpdatedAt.IsZero() {
+			return snap.UpdatedAt.UTC()
+		}
+		return snap.CreatedAt.UTC()
+	default:
+		return snap.CreatedAt.UTC()
+	}
 }
 
 func (s *memoryStore) attempts(ctx context.Context, id string) ([]AttemptSnapshot, error) {

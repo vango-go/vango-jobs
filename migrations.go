@@ -126,6 +126,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS vango_jobs_unique_active_idx
     ON vango_jobs (name, unique_key)
     WHERE unique_key IS NOT NULL AND status IN ('queued', 'running');
 
+CREATE INDEX IF NOT EXISTS vango_jobs_terminal_finished_idx
+    ON vango_jobs (status, finished_at DESC, id DESC)
+    WHERE status IN ('succeeded', 'failed', 'canceled');
+
 CREATE INDEX IF NOT EXISTS vango_job_attempts_job_idx
     ON vango_job_attempts (job_id, attempt DESC);
 

@@ -355,6 +355,17 @@ type ReplayFilter struct {
 	Limit    int
 }
 
+// ListOrder controls durable job listing order for admin/status surfaces.
+type ListOrder string
+
+const (
+	// ListOrderCreatedDesc keeps the historical default ordering by enqueue time.
+	ListOrderCreatedDesc ListOrder = "created_desc"
+	// ListOrderTerminalTimeDesc orders by the terminal completion time when present,
+	// falling back to updated/created time for non-terminal rows.
+	ListOrderTerminalTimeDesc ListOrder = "terminal_time_desc"
+)
+
 // ListFilter selects durable jobs for admin/status listing.
 type ListFilter struct {
 	Queue    string
@@ -364,6 +375,7 @@ type ListFilter struct {
 	Since    *time.Time
 	Until    *time.Time
 	Limit    int
+	Order    ListOrder
 }
 
 func normalizeListLimit(limit int) int {
@@ -374,6 +386,15 @@ func normalizeListLimit(limit int) int {
 		return 1000
 	default:
 		return limit
+	}
+}
+
+func normalizeListOrder(order ListOrder) ListOrder {
+	switch order {
+	case ListOrderTerminalTimeDesc:
+		return order
+	default:
+		return ListOrderCreatedDesc
 	}
 }
 

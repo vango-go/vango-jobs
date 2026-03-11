@@ -172,6 +172,69 @@ func TestPostgresRuntime(t *testing.T) {
 			t.Fatalf("resumed status=%s want succeeded", typed.Status)
 		}
 	})
+
+	t.Run("list supports terminal time ordering", func(t *testing.T) {
+		reg := jobs.NewRegistry()
+		def := jobs.New[string, string]("postgres.ordering.v1")
+		reg.MustHandle(def, func(ctx jobs.Ctx, in string) (string, error) {
+			return "", jobs.Permanent(jobs.Safe(errors.New(in), in))
+		})
+
+		rt, err := jobs.Open(pool, reg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = rt.Close() })
+
+		olderRef, err := rt.Enqueue(ctx, def, "older-failed-later", jobs.WithDelay(200*time.Millisecond))
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		newerRef, err := rt.Enqueue(ctx, def, "newer-failed-earlier")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		worker := rt.NewWorker(jobs.WithWorkerConcurrency(1))
+		if ran, err := worker.RunOnce(ctx); err != nil || ran != 1 {
+			t.Fatalf("first RunOnce ran=%d err=%v", ran, err)
+		}
+
+		time.Sleep(250 * time.Millisecond)
+		if ran, err := worker.RunOnce(ctx); err != nil || ran != 1 {
+			t.Fatalf("second RunOnce ran=%d err=%v", ran, err)
+		}
+
+		defaultOrder, err := rt.List(ctx, jobs.ListFilter{
+			Statuses: []jobs.Status{jobs.StatusFailed},
+			Limit:    10,
+		}, jobs.InspectAdmin())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(defaultOrder) != 2 {
+			t.Fatalf("len(defaultOrder)=%d want 2", len(defaultOrder))
+		}
+		if defaultOrder[0].Ref.ID != newerRef.ID || defaultOrder[1].Ref.ID != olderRef.ID {
+			t.Fatalf("default order got %s then %s, want %s then %s", defaultOrder[0].Ref.ID, defaultOrder[1].Ref.ID, newerRef.ID, olderRef.ID)
+		}
+
+		terminalOrder, err := rt.List(ctx, jobs.ListFilter{
+			Statuses: []jobs.Status{jobs.StatusFailed},
+			Limit:    10,
+			Order:    jobs.ListOrderTerminalTimeDesc,
+		}, jobs.InspectAdmin())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(terminalOrder) != 2 {
+			t.Fatalf("len(terminalOrder)=%d want 2", len(terminalOrder))
+		}
+		if terminalOrder[0].Ref.ID != olderRef.ID || terminalOrder[1].Ref.ID != newerRef.ID {
+			t.Fatalf("terminal order got %s then %s, want %s then %s", terminalOrder[0].Ref.ID, terminalOrder[1].Ref.ID, olderRef.ID, newerRef.ID)
+		}
+	})
 }
 
 func setupPostgres(t *testing.T) (context.Context, *pgxpool.Pool) {

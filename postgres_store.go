@@ -84,7 +84,7 @@ func (s *postgresStore) list(ctx context.Context, filter ListFilter, scope authS
 	for _, status := range filter.Statuses {
 		statuses = append(statuses, status.String())
 	}
-	rows, err := s.db.Query(ctx, `
+	query := fmt.Sprintf(`
 SELECT id, name, queue, status,
        COALESCE(tenant_id, ''), COALESCE(actor_id, ''), COALESCE(actor_kind, ''),
        attempts, max_attempts, run_at, created_at, updated_at,
@@ -106,9 +106,10 @@ WHERE ($1::boolean = true OR status = ANY($2))
       OR ($9 <> '' AND tenant_id = $9)
       OR ($10 <> '' AND actor_id = $10 AND actor_kind = $11)
   )
-ORDER BY created_at DESC, id DESC
+ORDER BY %s
 LIMIT $12
-`, len(statuses) == 0, statuses, filter.Queue, filter.JobName, filter.TenantID, filter.Since, filter.Until, scope.admin, scope.tenantID, scope.actor.ID, scope.actor.Kind, normalizeListLimit(filter.Limit))
+`, listOrderClause(filter.Order))
+	rows, err := s.db.Query(ctx, query, len(statuses) == 0, statuses, filter.Queue, filter.JobName, filter.TenantID, filter.Since, filter.Until, scope.admin, scope.tenantID, scope.actor.ID, scope.actor.Kind, normalizeListLimit(filter.Limit))
 	if err != nil {
 		return nil, err
 	}
@@ -126,6 +127,15 @@ LIMIT $12
 		return nil, err
 	}
 	return out, nil
+}
+
+func listOrderClause(order ListOrder) string {
+	switch normalizeListOrder(order) {
+	case ListOrderTerminalTimeDesc:
+		return "COALESCE(finished_at, updated_at, created_at) DESC, updated_at DESC, created_at DESC, id DESC"
+	default:
+		return "created_at DESC, id DESC"
+	}
 }
 
 func (s *postgresStore) attempts(ctx context.Context, id string) ([]AttemptSnapshot, error) {

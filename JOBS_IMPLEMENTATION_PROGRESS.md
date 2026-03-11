@@ -72,3 +72,7 @@
 - Integrated `vango dev --jobs` so local development can run an embedded jobs worker and stream status snapshots without adding direct framework coupling to the jobs runtime.
 - Updated the main Vango developer guide and scaffolded jobs docs so the Action/Resource/jobs contract is documented in the canonical framework guide and generated app docs.
 - Completed the expanded verification pass with `go test ./...` and `go vet ./...` in `vango-jobs`, plus `go test ./cmd/vango ./internal/templates` in the root `vango` repo.
+- Remediated audit finding P2 in `jobscmd`: explicit `jobs status --watch` remains fail-fast, while worker-process status snapshots now degrade to warnings instead of terminating the worker/scheduler loop on transient read failures.
+- Added regression coverage for fail-fast status watching and best-effort worker status reporting, then re-ran `go test ./...` and `go vet ./...` in `vango-jobs`.
+- Remediated the `jobs status` data-exposure audit finding by replacing raw recent-failure snapshots with an explicit safe summary shape that excludes payload, output, and metadata, then re-ran `go test ./...` and `go vet ./...` in `vango-jobs`.
+- Remediated the recent-failures ordering audit finding by adding explicit list ordering modes, switching `jobs status` to terminal-time ordering, adding a terminal-row PostgreSQL index, and covering the behavior in memory/PostgreSQL regression tests; verification re-run completed with `go test ./...` and `go vet ./...`.

@@ -221,6 +221,67 @@ func TestListFiltersRecentJobs(t *testing.T) {
 	}
 }
 
+func TestListSupportsTerminalTimeOrdering(t *testing.T) {
+	reg := jobs.NewRegistry()
+	reg.MustHandle(retryJob, func(ctx jobs.Ctx, in echoIn) (echoOut, error) {
+		return echoOut{}, jobs.Permanent(jobs.Safe(errors.New(in.Message), in.Message))
+	})
+
+	h, err := jobstest.New(reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	olderRef, err := h.Enqueue(context.Background(), retryJob, echoIn{Message: "older-failed-later"}, jobs.WithDelay(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Advance(time.Second)
+	newerRef, err := h.Enqueue(context.Background(), retryJob, echoIn{Message: "newer-failed-earlier"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ran, err := h.RunNext(context.Background()); err != nil || !ran {
+		t.Fatalf("RunNext ran=%v err=%v", ran, err)
+	}
+
+	h.Advance(time.Second)
+	if ran, err := h.RunNext(context.Background()); err != nil || !ran {
+		t.Fatalf("second RunNext ran=%v err=%v", ran, err)
+	}
+
+	defaultOrder, err := h.Runtime.List(context.Background(), jobs.ListFilter{
+		Statuses: []jobs.Status{jobs.StatusFailed},
+		Limit:    10,
+	}, jobs.InspectAdmin())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defaultOrder) != 2 {
+		t.Fatalf("len(defaultOrder)=%d want 2", len(defaultOrder))
+	}
+	if defaultOrder[0].Ref.ID != newerRef.ID || defaultOrder[1].Ref.ID != olderRef.ID {
+		t.Fatalf("default order got %s then %s, want newer-created %s then %s", defaultOrder[0].Ref.ID, defaultOrder[1].Ref.ID, newerRef.ID, olderRef.ID)
+	}
+
+	terminalOrder, err := h.Runtime.List(context.Background(), jobs.ListFilter{
+		Statuses: []jobs.Status{jobs.StatusFailed},
+		Limit:    10,
+		Order:    jobs.ListOrderTerminalTimeDesc,
+	}, jobs.InspectAdmin())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(terminalOrder) != 2 {
+		t.Fatalf("len(terminalOrder)=%d want 2", len(terminalOrder))
+	}
+	if terminalOrder[0].Ref.ID != olderRef.ID || terminalOrder[1].Ref.ID != newerRef.ID {
+		t.Fatalf("terminal order got %s then %s, want older-failed-later %s then %s", terminalOrder[0].Ref.ID, terminalOrder[1].Ref.ID, olderRef.ID, newerRef.ID)
+	}
+}
+
 func TestUniqueKeyReturnsExistingRef(t *testing.T) {
 	reg := jobs.NewRegistry()
 	reg.MustHandle(echoJob, func(ctx jobs.Ctx, in echoIn) (echoOut, error) {
